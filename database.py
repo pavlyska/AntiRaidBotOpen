@@ -14,6 +14,7 @@ class Database:
         self._create_tables()
         self._ensure_guild_ids_column()
         self._load_data_to_memory()
+        self.global_ban_servers = set()
 
     def _ensure_guild_ids_column(self):
         try:
@@ -44,37 +45,66 @@ class Database:
                     guild_id INTEGER PRIMARY KEY,
                     owner_id INTEGER NOT NULL,
                     enabled INTEGER DEFAULT 1
-                )''')
+                )
+            ''')
             self.cursor.execute('''
                 CREATE TABLE IF NOT EXISTS global_bans_servers (
                     user_id INTEGER,
                     guild_id INTEGER,
                     PRIMARY KEY (user_id, guild_id)
-                )''')
+                )
+            ''')
+            self.cursor.execute('''
+                CREATE TABLE IF NOT EXISTS antiremove_roles (
+                    guild_id INTEGER,
+                    user_id INTEGER,
+                    PRIMARY KEY (guild_id, user_id)
+                )
+            ''')
+
             self.cursor.execute('''
                 CREATE TABLE IF NOT EXISTS gban_allowed_roles (
                     guild_id INTEGER,
                     role_id INTEGER,
                     PRIMARY KEY (guild_id, role_id)
-                )''')
+                )
+            ''')
+
             self.cursor.execute('''
                 CREATE TABLE IF NOT EXISTS global_bans (
                     user_id INTEGER PRIMARY KEY,
                     timestamp REAL NOT NULL,
                     reason TEXT,
                     issuer_id INTEGER,
+                    owner_id INTEGER, -- <-- ДОБАВЛЕНО: ID владельца сети
                     guild_ids TEXT
-                )''')
-            
-            # --- Таблица для хранения состояния защиты (вкл/выкл) ---
+                )
+            ''')
             self.cursor.execute('''
-            CREATE TABLE IF NOT EXISTS protection_status (
-                guild_id INTEGER PRIMARY KEY,
-                is_enabled INTEGER DEFAULT 0
-            )
+                CREATE TABLE IF NOT EXISTS aban_allowed_roles (
+                    guild_id INTEGER,
+                    role_id INTEGER,
+                    PRIMARY KEY (guild_id, role_id)
+                )
             ''')
 
-            # --- Таблица для хранения лимитов действий ---
+            self.cursor.execute('''
+                CREATE TABLE IF NOT EXISTS action_logs (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    guild_id TEXT NOT NULL,
+                    user_id TEXT NOT NULL,
+                    action_type TEXT NOT NULL,  -- 'role_create', 'role_delete', 'channel_create', etc.
+                    timestamp DATETIME DEFAULT CURRENT_TIMESTAMP
+                )
+            ''')
+
+            self.cursor.execute('''
+                CREATE TABLE IF NOT EXISTS protection_status (
+                    guild_id INTEGER PRIMARY KEY,
+                    is_enabled INTEGER DEFAULT 0
+                )
+            ''')
+
             self.cursor.execute('''
             CREATE TABLE IF NOT EXISTS action_limits (
                 guild_id INTEGER PRIMARY KEY,
@@ -83,33 +113,28 @@ class Database:
             )
             ''')
 
-            # Таблица для логирования попыток рейдов
             self.cursor.execute('''CREATE TABLE IF NOT EXISTS raid_attempts (
                                   id INTEGER PRIMARY KEY AUTOINCREMENT,
                                   guild_id INTEGER,
                                   timestamp TEXT)''')
 
-            # Таблица для логирования активаций защиты
             self.cursor.execute('''CREATE TABLE IF NOT EXISTS protection_activations (
                                   id INTEGER PRIMARY KEY AUTOINCREMENT,
                                   guild_id INTEGER,
                                   timestamp TEXT)''')
 
-            # Таблица для логирования блокировки ролей
             self.cursor.execute('''CREATE TABLE IF NOT EXISTS role_blocks (
                                   id INTEGER PRIMARY KEY AUTOINCREMENT,
                                   guild_id INTEGER,
                                   role_id INTEGER,
                                   timestamp TEXT)''')
 
-            # Таблица для логирования удаления каналов
             self.cursor.execute('''CREATE TABLE IF NOT EXISTS channel_blocks (
                                   id INTEGER PRIMARY KEY AUTOINCREMENT,
                                   guild_id INTEGER,
                                   channel_id INTEGER,
                                   timestamp TEXT)''')
 
-            # --- Таблица для логирования использования запрета ---
             self.cursor.execute('''
             CREATE TABLE IF NOT EXISTS aban_usage_log (
                 id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -120,7 +145,24 @@ class Database:
             )
             ''')
 
-            # --- Таблица для хранения доверенных лиц ---
+            # --- Creact Settings ---
+            self.cursor.execute('''
+            CREATE TABLE IF NOT EXISTS creact_settings (
+                guild_id INTEGER PRIMARY KEY,
+                enabled INTEGER DEFAULT 0,
+                emoji TEXT,
+                created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+            )
+            ''')
+
+            self.cursor.execute('''
+            CREATE TABLE IF NOT EXISTS creact_roles (
+                guild_id INTEGER,
+                role_id INTEGER,
+                PRIMARY KEY (guild_id, role_id)
+            )
+            ''')
+
             self.cursor.execute('''
             CREATE TABLE IF NOT EXISTS trusted_users (
                 id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -131,16 +173,14 @@ class Database:
             )
             ''')
 
-            # --- Таблица для разрешённых ролей для команды /aban ---
             self.cursor.execute('''
-            CREATE TABLE IF NOT EXISTS aban_allowed_roles (
-                guild_id INTEGER,
-                role_id INTEGER,
-                PRIMARY KEY (guild_id, role_id)
+            CREATE TABLE IF NOT EXISTS server_settings (
+                guild_id INTEGER PRIMARY KEY,
+                freeze_mode INTEGER DEFAULT 0,           -- 0 = выключен, 1 = включён
+                created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
             )
             ''')
 
-            # --- Таблица для отслеживания действий пользователей ---
             self.cursor.execute('''
             CREATE TABLE IF NOT EXISTS user_actions (
                 id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -151,7 +191,6 @@ class Database:
             )
             ''')
 
-            # --- НОВАЯ ТАБЛИЦА: Действия с ролями ---
             self.cursor.execute('''
             CREATE TABLE IF NOT EXISTS role_actions (
                 id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -162,7 +201,6 @@ class Database:
             )
             ''')
 
-            # --- НОВАЯ ТАБЛИЦА: Действия с каналами ---
             self.cursor.execute('''
             CREATE TABLE IF NOT EXISTS channel_actions (
                 id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -173,7 +211,6 @@ class Database:
             )
             ''')
 
-            # --- Таблица для хранения изображений серверов ---
             self.cursor.execute('''
             CREATE TABLE IF NOT EXISTS server_images (
                 guild_id INTEGER PRIMARY KEY,
@@ -182,20 +219,6 @@ class Database:
             )
             ''')
 
-            # --- Таблица для хранения премиум-кодов ---
-            self.cursor.execute('''
-            CREATE TABLE IF NOT EXISTS premium_codes (
-                id INTEGER PRIMARY KEY AUTOINCREMENT,
-                code TEXT UNIQUE,
-                duration_days INTEGER,
-                expires_at TIMESTAMP,
-                used INTEGER DEFAULT 0,
-                used_by INTEGER,
-                used_at TIMESTAMP
-            )
-            ''')
-
-            # --- Таблица для хранения премиум-статуса пользователей ---
             self.cursor.execute('''
             CREATE TABLE IF NOT EXISTS premium_status (
                 id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -206,7 +229,6 @@ class Database:
             )
             ''')
 
-            # --- Таблица для хранения черного списка ролей ---
             self.cursor.execute('''
             CREATE TABLE IF NOT EXISTS blacklisted_roles (
                 guild_id INTEGER,
@@ -215,36 +237,22 @@ class Database:
             )
             ''')
 
-            # --- Таблица для хранения прав каналов при включении raid_mode ---
-            self.cursor.execute('''
-            CREATE TABLE IF NOT EXISTS channel_permissions (
-                id INTEGER PRIMARY KEY AUTOINCREMENT,
-                guild_id INTEGER,
-                channel_id INTEGER,
-                permissions TEXT,
-                saved_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
-                expires_at TIMESTAMP,
-                UNIQUE(guild_id, channel_id)
-            )
-            ''')
-
             self.connection.commit()
         except sqlite3.Error as e:
-            print(f"Ошибка создания таблиц: {e}")
+            print(f"\nОшибка создания таблиц:\n{e}")
 
-    def add_global_ban_server(self, guild_id, owner_id):
+    def add_global_ban_server(self, guild_id: int, owner_id: int):
         try:
-            self.cursor.execute("""
-                INSERT OR IGNORE INTO global_ban_servers 
-                (guild_id, owner_id, enabled) 
-                VALUES (?, ?, 1)
-            """, (guild_id, owner_id))
+            self.cursor.execute(
+                "INSERT OR IGNORE INTO global_ban_servers (guild_id, owner_id, enabled) VALUES (?, ?, 1)",
+                (guild_id, owner_id)
+            )
             self.connection.commit()
             self.global_ban_servers.add(guild_id)
-            return True
         except sqlite3.Error as e:
-            print(f"[Ошибка БД] add_global_ban_server: {e}")
-            return False
+            print(
+                f"\nОшибка при добавлении сервера {guild_id} в сеть владельца {owner_id}:\n{e}"
+            )
 
     def remove_global_ban_server(self, guild_id):
         try:
@@ -257,11 +265,16 @@ class Database:
             return False
 
     def is_global_ban_server(self, guild_id):
-        return guild_id in self.global_ban_servers
+        try:
+            self.cursor.execute("SELECT 1 FROM global_ban_servers WHERE guild_id = ?", (guild_id,))
+            return self.cursor.fetchone() is not None
+        except sqlite3.Error as e:
+            print(f"[Ошибка БД] при проверке is_global_ban_server: {e}")
+            return False
 
     def get_global_ban(self, user_id):
         try:
-            self.cursor.execute("SELECT * FROM global_bans WHERE user_id = ?", (user_id,))
+            self.cursor.execute("SELECT user_id, timestamp, reason, issuer_id, owner_id, guild_ids FROM global_bans WHERE user_id = ?", (user_id,))
             result = self.cursor.fetchone()
             if result:
                 return {
@@ -269,7 +282,8 @@ class Database:
                     "timestamp": result[1],
                     "reason": result[2],
                     "issuer_id": result[3],
-                    "guild_ids": json.loads(result[4]) if result[4] else []
+                    "owner_id": result[4],
+                    "guild_ids": json.loads(result[5]) if result[5] else []
                 }
             return None
         except sqlite3.Error as e:
@@ -279,15 +293,17 @@ class Database:
     def add_global_ban(self, user_id, ban_data):
         try:
             guild_ids = ban_data.get("guild_ids", [])
+            owner_id = ban_data.get("owner_id") 
             self.cursor.execute("""
                 INSERT OR REPLACE INTO global_bans 
-                (user_id, timestamp, reason, issuer_id, guild_ids) 
-                VALUES (?, ?, ?, ?, ?)
+                (user_id, timestamp, reason, issuer_id, owner_id, guild_ids) 
+                VALUES (?, ?, ?, ?, ?, ?)
             """, (
                 user_id,
                 ban_data["timestamp"],
                 ban_data["reason"],
                 ban_data["issuer_id"],
+                owner_id, 
                 json.dumps(guild_ids)
             ))
             self.connection.commit()
@@ -343,11 +359,17 @@ class Database:
             print(f"[Ошибка БД] remove_gban_allowed_role: {e}")
             return False
 
-    def check_premium_status(self, owner_id):
-        return True
-    
+    def check_premium_status(self, user_id):
+        try:
+            self.cursor.execute(
+                "SELECT expires_at FROM premium_status WHERE user_id = ? AND expires_at > ?",
+                (user_id, datetime.now().strftime('%Y-%m-%d %H:%M:%S'))
+            )
+            return self.cursor.fetchone() is not None
+        except sqlite3.Error:
+            return False
+
     def set_server_image(self, guild_id, image_url):
-        """Установка изображения для сервера"""
         try:
             self.cursor.execute(
                 """
@@ -361,9 +383,8 @@ class Database:
         except sqlite3.Error as e:
             print(f"Ошибка установки изображения сервера: {e}")
             return False
-    
+
     def get_server_image(self, guild_id):
-        """Получение URL изображения для сервера"""
         try:
             self.cursor.execute(
                 "SELECT image_url FROM server_images WHERE guild_id = ?",
@@ -374,9 +395,8 @@ class Database:
         except sqlite3.Error as e:
             print(f"Ошибка получения изображения сервера: {e}")
             return None
-    
+
     def get_premium_status(self, user_id, guild_id):
-        """Проверка премиум-статуса пользователя на сервере"""
         try:
             self.cursor.execute(
                 "SELECT expires_at FROM premium_status WHERE user_id = ? AND guild_id = ?",
@@ -399,7 +419,6 @@ class Database:
             return {"is_premium": False, "expires_at": None}
 
     def add_trusted_user(self, guild_id, user_id):
-        """Добавление пользователя в список доверенных лиц"""
         try:
             self.cursor.execute(
                 "INSERT OR IGNORE INTO trusted_users (guild_id, user_id) VALUES (?, ?)",
@@ -410,9 +429,8 @@ class Database:
         except sqlite3.Error as e:
             print(f"Ошибка добавления доверенного лица: {e}")
             return False
-    
+
     def remove_trusted_user(self, guild_id, user_id):
-        """Удаление пользователя из списка доверенных лиц"""
         try:
             self.cursor.execute(
                 "DELETE FROM trusted_users WHERE guild_id = ? AND user_id = ?",
@@ -423,9 +441,8 @@ class Database:
         except sqlite3.Error as e:
             print(f"Ошибка удаления доверенного лица: {e}")
             return False
-    
+
     def is_trusted_user(self, guild_id, user_id):
-        """Проверка, является ли пользователь доверенным лицом"""
         try:
             self.cursor.execute(
                 "SELECT 1 FROM trusted_users WHERE guild_id = ? AND user_id = ?",
@@ -435,9 +452,8 @@ class Database:
         except sqlite3.Error as e:
             print(f"Ошибка проверки доверенного лица: {e}")
             return False
-    
+
     def get_trusted_users(self, guild_id):
-        """Получение списка доверенных лиц для сервера"""
         try:
             self.cursor.execute(
                 "SELECT user_id FROM trusted_users WHERE guild_id = ?",
@@ -449,7 +465,6 @@ class Database:
             return []
 
     def get_action_limits(self, guild_id):
-        """Получение лимитов действий для сервера"""
         try:
             self.cursor.execute("SELECT role_limit, channel_limit FROM action_limits WHERE guild_id = ?", (guild_id,))
             result = self.cursor.fetchone()
@@ -465,9 +480,8 @@ class Database:
         except sqlite3.Error as e:
             print(f"Ошибка получения лимитов действий: {e}")
             return {"role_limit": 5, "channel_limit": 5}
-    
+
     def set_action_limits(self, guild_id, role_limit, channel_limit):
-        """Установка лимитов действий для сервера"""
         try:
             self.cursor.execute(
                 "INSERT OR REPLACE INTO action_limits (guild_id, role_limit, channel_limit) VALUES (?, ?, ?)",
@@ -478,15 +492,7 @@ class Database:
         except sqlite3.Error as e:
             print(f"Ошибка установки лимитов действий: {e}")
             return False
-        
 
-    def get_blacklisted_roles(self, guild_id):
-        try:
-            self.cursor.execute("SELECT role_id FROM blacklisted_roles WHERE guild_id = ?", (guild_id,))
-            return [row[0] for row in self.cursor.fetchall()]
-        except sqlite3.Error as e:
-            print(f"[Ошибка БД] get_blacklisted_roles: {e}")
-            return []
 
     def set_blacklisted_roles(self, guild_id, role_ids):
         try:
@@ -534,7 +540,6 @@ class Database:
             return False
 
     def get_aban_history(self, guild_id, limit=10):
-        """Возвращает историю использования команды /aban для сервера"""
         try:
             self.cursor.execute(
                 """
@@ -553,7 +558,6 @@ class Database:
             return []
 
     def get_protection_status(self, guild_id):
-        """Получение статуса защиты для сервера"""
         try:
             self.cursor.execute("SELECT is_enabled FROM protection_status WHERE guild_id = ?", (guild_id,))
             result = self.cursor.fetchone()
@@ -566,9 +570,8 @@ class Database:
         except sqlite3.Error as e:
             print(f"Ошибка получения статуса защиты: {e}")
             return False
-    
+
     def set_protection_status(self, guild_id, status):
-        """Установка статуса защиты для сервера"""
         try:
             self.cursor.execute(
                 "INSERT OR REPLACE INTO protection_status (guild_id, is_enabled) VALUES (?, ?)",
@@ -580,43 +583,7 @@ class Database:
             print(f"Ошибка установки статуса защиты: {e}")
             return False
 
-    def grant_temporary_permissions(self, guild_id, channel_id, role_id, duration_minutes):
-        try:
-            expires_at = (datetime.now() + timedelta(minutes=duration_minutes)).strftime('%Y-%m-%d %H:%M:%S')
-            self.cursor.execute("""
-                INSERT OR REPLACE INTO channel_permissions 
-                (guild_id, channel_id, role_id, expires_at) 
-                VALUES (?, ?, ?, ?)
-            """, (guild_id, channel_id, role_id, expires_at))
-            self.connection.commit()
-            return True
-        except sqlite3.Error as e:
-            print(f"[Ошибка БД] grant_temporary_permissions: {e}")
-            return False
 
-    def get_temporary_permissions(self, guild_id, channel_id):
-        try:
-            self.cursor.execute("""
-                SELECT role_id, expires_at FROM channel_permissions 
-                WHERE guild_id = ? AND channel_id = ? AND expires_at > ?
-            """, (guild_id, channel_id, datetime.now().strftime('%Y-%m-%d %H:%M:%S')))
-            result = self.cursor.fetchone()
-            if result:
-                return {"role_id": result[0], "expires_at": result[1]}
-            return None
-        except sqlite3.Error as e:
-            print(f"[Ошибка БД] get_temporary_permissions: {e}")
-            return None
-
-    def clear_expired_permissions(self):
-        try:
-            expires_at_threshold = datetime.now().strftime('%Y-%m-%d %H:%M:%S')
-            self.cursor.execute("DELETE FROM channel_permissions WHERE expires_at <= ?", (expires_at_threshold,))
-            self.connection.commit()
-            return True
-        except sqlite3.Error as e:
-            print(f"[Ошибка БД] clear_expired_permissions: {e}")
-            return False
 
     def close(self):
         if self.connection:
@@ -639,22 +606,16 @@ class Database:
                     "INSERT OR IGNORE INTO gban_allowed_roles (guild_id, role_id) VALUES (?, ?)", 
                     data
                 )
-            self.connection.commit()
-            if guild_id in self.gban_allowed_roles:
+                # Обновляем кеш
                 self.gban_allowed_roles[guild_id] = set(role_ids)
+            else:
+                self.gban_allowed_roles.pop(guild_id, None)
+            self.connection.commit()
             return True
         except sqlite3.Error as e:
             print(f"[Ошибка БД] set_gban_allowed_roles: {e}")
             return False
 
-    def get_all_global_ban_servers(self):
-        try:
-            self.cursor.execute("SELECT guild_id FROM global_ban_servers WHERE enabled = 1")
-            return [row[0] for row in self.cursor.fetchall()]
-        except sqlite3.Error as e:
-            print(f"[Ошибка БД] get_all_global_ban_servers: {e}")
-            return []
-    
     def add_count_column(self):
         try:
             self.cursor.execute("ALTER TABLE user_actions ADD COLUMN count INTEGER DEFAULT 0")
@@ -665,7 +626,7 @@ class Database:
             else:
                 print(f"[ERROR] Ошибка при добавлении колонки: {e}")
         self.connection.commit()
-    
+
     def reset_user_actions(self, guild_id, user_id, action_type):
         try:
             self.cursor.execute(
@@ -677,17 +638,6 @@ class Database:
         except sqlite3.Error as e:
             print(f"[Ошибка] Сброса счетчика действий: {e}")
             return False
-        
-    def get_blacklisted_roles(self, guild_id):
-        try:
-            self.cursor.execute(
-                "SELECT role_id FROM blacklisted_roles WHERE guild_id = ?",
-                (guild_id,)
-            )
-            return [row[0] for row in self.cursor.fetchall()]
-        except sqlite3.Error as e:
-            print(f"Ошибка получения черного списка ролей: {e}")
-            return []
 
     def remove_blacklisted_role(self, guild_id, role_id):
         try:
@@ -750,56 +700,192 @@ class Database:
         except sqlite3.Error as e:
             print(f"Ошибка удаления роли из черного списка: {e}")
             return False
+    
+    def get_freeze_mode(self, guild_id: int) -> bool:
+        self.cursor.execute("SELECT freeze_mode FROM server_settings WHERE guild_id = ?", (guild_id,))
+        result = self.cursor.fetchone()
+        return bool(result[0]) if result else False
+    
+    def set_freeze_mode(self, guild_id: int, state: bool):
+        self.cursor.execute(
+            "INSERT OR REPLACE INTO server_settings (guild_id, freeze_mode) VALUES (?, ?)",
+            (guild_id, int(state))
+        )
+        self.connection.commit()
+
+    def count_user_actions(self, guild_id, user_id, action_type):
+        self.cursor.execute("""
+            SELECT COUNT(*) FROM action_logs
+            WHERE guild_id = ?
+              AND user_id = ?
+              AND action_type = ?
+              AND timestamp >= datetime('now', '-1 day')
+        """, (str(guild_id), str(user_id), action_type))
+
+        return self.cursor.fetchone()[0]
+
+    def log_action(self, guild_id, user_id, action_type):
+        try:
+            self.cursor.execute('''
+                INSERT INTO action_logs (guild_id, user_id, action_type, timestamp)
+                VALUES (?, ?, ?, CURRENT_TIMESTAMP)
+            ''', (str(guild_id), str(user_id), action_type))
+            self.connection.commit()
+            return True
+        except sqlite3.Error as e:
+            print(f"[Ошибка] Не удалось записать лог действия: {e}")
+            return False
+
+    def add_aban_allowed_role(self, guild_id: int, role_id: int) -> bool:
+        try:
+            self.cursor.execute(
+                "INSERT OR IGNORE INTO aban_allowed_roles (guild_id, role_id) VALUES (?, ?)",
+                (guild_id, role_id)
+            )
+            self.connection.commit()
+            return True
+        except sqlite3.Error as e:
+            print(f"Ошибка добавления роли для /aban: {e}")
+            return False
+
+    def remove_aban_allowed_role(self, guild_id: int, role_id: int) -> bool:
+        try:
+            self.cursor.execute(
+                "DELETE FROM aban_allowed_roles WHERE guild_id = ? AND role_id = ?",
+                (guild_id, role_id)
+            )
+            self.connection.commit()
+            return True
+        except sqlite3.Error as e:
+            print(f"Ошибка удаления роли из /aban: {e}")
+            return False
+
+    
+    def get_linked_servers(self, owner_id: int) -> list:
+        try:
+            self.cursor.execute(
+                "SELECT guild_id FROM global_ban_servers "
+                "WHERE owner_id = ? AND enabled = 1",
+                (owner_id,)
+            )
+            return [row[0] for row in self.cursor.fetchall()]
+        except sqlite3.Error as e:
+            print(
+                f"[Ошибка БД] Не удалось получить связанные серверы "
+                f"для владельца {owner_id}: {e}"
+            )
+            return []
         
-    def get_channel_permissions(self, guild_id):
+    def get_creact_settings(self, guild_id):
+        try:
+            self.cursor.execute("SELECT enabled, emoji FROM creact_settings WHERE guild_id = ?", (guild_id,))
+            row = self.cursor.fetchone()
+            if row:
+                return {"enabled": bool(row[0]), "emoji": row[1]}
+            else:
+                # Создаём дефолтную запись
+                self.cursor.execute("INSERT INTO creact_settings (guild_id, enabled, emoji) VALUES (?, 0, ?)", (guild_id, "🚫"))
+                self.connection.commit()
+                return {"enabled": False, "emoji": "🚫"}
+        except sqlite3.Error as e:
+            print(f"[Ошибка БД] get_creact_settings: {e}")
+            return {"enabled": False, "emoji": "🚫"}
+
+    def set_creact_enabled(self, guild_id, enabled):
+        try:
+            self.cursor.execute("UPDATE creact_settings SET enabled = ? WHERE guild_id = ?", (int(enabled), guild_id))
+            self.connection.commit()
+            return True
+        except sqlite3.Error as e:
+            print(f"[Ошибка БД] set_creact_enabled: {e}")
+            return False
+
+    def set_creact_emoji(self, guild_id, emoji):
+        try:
+            self.cursor.execute("UPDATE creact_settings SET emoji = ? WHERE guild_id = ?", (emoji, guild_id))
+            self.connection.commit()
+            return True
+        except sqlite3.Error as e:
+            print(f"[Ошибка БД] set_creact_emoji: {e}")
+            return False
+
+    def add_creact_role(self, guild_id, role_id):
+        try:
+            self.cursor.execute("INSERT OR IGNORE INTO creact_roles (guild_id, role_id) VALUES (?, ?)", (guild_id, role_id))
+            self.connection.commit()
+            return True
+        except sqlite3.Error as e:
+            print(f"[Ошибка БД] add_creact_role: {e}")
+            return False
+
+    def remove_creact_role(self, guild_id, role_id):
+        try:
+            self.cursor.execute("DELETE FROM creact_roles WHERE guild_id = ? AND role_id = ?", (guild_id, role_id))
+            self.connection.commit()
+            return True
+        except sqlite3.Error as e:
+            print(f"[Ошибка БД] remove_creact_role: {e}")
+            return False
+
+    def get_creact_roles(self, guild_id):
+        try:
+            self.cursor.execute("SELECT role_id FROM creact_roles WHERE guild_id = ?", (guild_id,))
+            return [row[0] for row in self.cursor.fetchall()]
+        except sqlite3.Error as e:
+            print(f"[Ошибка БД] get_creact_roles: {e}")
+            return []
+
+    def clear_creact_roles(self, guild_id):
+        try:
+            self.cursor.execute("DELETE FROM creact_roles WHERE guild_id = ?", (guild_id,))
+            self.connection.commit()
+            return True
+        except sqlite3.Error as e:
+            print(f"[Ошибка БД] clear_creact_roles: {e}")
+            return False
+        
+    def add_antiremove_user(self, guild_id: int, user_id: int) -> bool:
         try:
             self.cursor.execute(
-                "SELECT channel_id, permissions FROM channel_permissions WHERE guild_id = ?",
+                "INSERT OR IGNORE INTO antiremove_roles (guild_id, user_id) VALUES (?, ?)",
+                (guild_id, user_id)
+            )
+            self.connection.commit()
+            return True
+        except sqlite3.Error as e:
+            print(f"[Ошибка БД] add_antiremove_user: {e}")
+            return False
+
+    def remove_antiremove_user(self, guild_id: int, user_id: int) -> bool:
+        try:
+            self.cursor.execute(
+                "DELETE FROM antiremove_roles WHERE guild_id = ? AND user_id = ?",
+                (guild_id, user_id)
+            )
+            self.connection.commit()
+            return True
+        except sqlite3.Error as e:
+            print(f"[Ошибка БД] remove_antiremove_user: {e}")
+            return False
+
+    def is_antiremove_user(self, guild_id: int, user_id: int) -> bool:
+        try:
+            self.cursor.execute(
+                "SELECT 1 FROM antiremove_roles WHERE guild_id = ? AND user_id = ?",
+                (guild_id, user_id)
+            )
+            return self.cursor.fetchone() is not None
+        except sqlite3.Error as e:
+            print(f"[Ошибка БД] is_antiremove_user: {e}")
+            return False
+
+    def get_antiremove_users(self, guild_id: int) -> list:
+        try:
+            self.cursor.execute(
+                "SELECT user_id FROM antiremove_roles WHERE guild_id = ?",
                 (guild_id,)
             )
-            results = self.cursor.fetchall()
-            return {str(row[0]): row[1] for row in results}
+            return [row[0] for row in self.cursor.fetchall()]
         except sqlite3.Error as e:
-            print(f"Ошибка получения прав каналов: {e}")
-            return {}
-
-    def save_channel_permissions(self, guild_id, channel_id, permissions):
-        try:
-            expires_at = (datetime.now() + timedelta(days=3)).strftime('%Y-%m-%d %H:%M:%S')
-            self.cursor.execute(
-                """
-                INSERT OR REPLACE INTO channel_permissions (guild_id, channel_id, permissions, expires_at)
-                VALUES (?, ?, ?, ?)
-                """,
-                (guild_id, channel_id, permissions, expires_at)
-            )
-            self.connection.commit()
-            return True
-        except sqlite3.Error as e:
-            print(f"Ошибка сохранения прав канала: {e}")
-            return False
-
-    def clear_channel_permissions(self, guild_id):
-        try:
-            self.cursor.execute(
-                "DELETE FROM channel_permissions WHERE guild_id = ?",
-                (guild_id,)
-            )
-            self.connection.commit()
-            return True
-        except sqlite3.Error as e:
-            print(f"Ошибка очистки прав каналов: {e}")
-            return False
-
-    def cleanup_expired_permissions(self):
-        try:
-            expires_at_threshold = datetime.now().strftime('%Y-%m-%d %H:%M:%S')
-            self.cursor.execute(
-                "DELETE FROM channel_permissions WHERE expires_at <= ?",
-                (expires_at_threshold,)
-            )
-            self.connection.commit()
-            return True
-        except sqlite3.Error as e:
-            print(f"Ошибка очистки истекших прав: {e}")
-            return False
+            print(f"[Ошибка БД] get_antiremove_users: {e}")
+            return []
